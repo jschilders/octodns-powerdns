@@ -42,7 +42,7 @@ providers:
       host: fqdn
       # The port on which PowerDNS api is listening (optional, default 8081)
       port: 8081
-      # The api key that grans access (required, example is using an env var)
+      # The api key that grants access (required, example is using an env var)
       api_key: env/POWERDNS_API_KEY
       # The URL scheme (optional, default http)
       # scheme: https
