@@ -161,6 +161,9 @@ class PowerDnsBaseProvider(BaseProvider):
         # set slave tsig key ids
         self.slave_tsig_key_ids = slave_tsig_key_ids
 
+        # reset zone cache
+        self.clear_zonecache()
+
     def _request(self, method, path, data=None):
         self.log.debug('_request: method=%s, path=%s', method, path)
 
@@ -495,6 +498,18 @@ class PowerDnsBaseProvider(BaseProvider):
         resp = self._get('zones')
         return sorted([z['name'] for z in resp.json()])
 
+    def clear_zonecache(self):
+        self._cached_zones = {}
+
+    def read_zonecache(self, name):
+        return self._cached_zones.get(name, None)
+
+    def update_zonecache(self, name, zone):
+        self._cached_zones[name] = zone
+
+    def delete_zonecache(self, name):
+        self._cached_zones.pop(name, None)
+
     def populate(self, zone, target=False, lenient=False):
         self.log.debug(
             'populate: name=%s, target=%s, lenient=%s',
@@ -502,33 +517,8 @@ class PowerDnsBaseProvider(BaseProvider):
             target,
             lenient,
         )
-        encoded_name = _encode_zone_name(zone.name)
-        resp = None
-        try:
-            resp = self._get(f'zones/{encoded_name}')
-            self.log.debug('populate:   loaded')
-        except HTTPError as e:
-            error = self._get_error(e)
-            if e.response.status_code == 401:
-                # Nicer error message for auth problems
-                raise Exception(f'PowerDNS unauthorized host={self.host}')
-            elif e.response.status_code == 404 and self.check_status_not_found:
-                # 404 means powerdns doesn't know anything about the requested
-                # domain. We'll just ignore it here and leave the zone
-                # untouched.
-                pass
-            elif (
-                e.response.status_code == 422
-                and error.startswith('Could not find domain ')
-                and not self.check_status_not_found
-            ):
-                # 422 means powerdns doesn't know anything about the requested
-                # domain. We'll just ignore it here and leave the zone
-                # untouched.
-                pass
-            else:
-                # just re-throw
-                raise
+
+        resp = self._get_zone(zone.name)
 
         before = len(zone.records)
         exists = False
@@ -709,6 +699,43 @@ class PowerDnsBaseProvider(BaseProvider):
             'records': records,
         }
 
+    def _get_zone(self, name):
+
+        encoded_name = _encode_zone_name(name)
+
+        #zone={}
+        zone = self.read_zonecache(encoded_name)
+
+        if not zone:
+            try:
+                zone = self._get(f'zones/{encoded_name}')
+                self.update_zonecache(encoded_name, zone)
+                self.log.debug('populate:   loaded')
+            except HTTPError as e:
+                error = self._get_error(e)
+                if e.response.status_code == 401:
+                    # Nicer error message for auth problems
+                    raise Exception(f'PowerDNS unauthorized host={self.host}')
+                elif e.response.status_code == 404 and self.check_status_not_found:
+                    # 404 means powerdns doesn't know anything about the requested
+                    # domain. We'll just ignore it here and leave the zone
+                    # untouched.
+                    pass
+                elif (
+                    e.response.status_code == 422
+                    and error.startswith('Could not find domain ')
+                    and not self.check_status_not_found
+                ):
+                    # 422 means powerdns doesn't know anything about the requested
+                    # domain. We'll just ignore it here and leave the zone
+                    # untouched.
+                    pass
+                else:
+                    # just re-throw
+                    raise
+
+        return zone
+
     def _get_error(self, http_error):
         try:
             return http_error.response.json()['error']
@@ -801,6 +828,8 @@ class PowerDnsBaseProvider(BaseProvider):
 
             if len(_data.keys()) > 0:
                 self._put(f'zones/{encoded_name}', data=_data)
+
+            self.delete_zonecache(encoded_name)
 
         except HTTPError as e:
             error = self._get_error(e)
