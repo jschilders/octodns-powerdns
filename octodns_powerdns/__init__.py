@@ -109,6 +109,8 @@ class PowerDnsBaseProvider(BaseProvider):
         timeout=TIMEOUT,
         soa_edit_api='default',
         mode_of_operation='master',
+        master_tsig_key_ids=[],
+        slave_tsig_key_ids=[],
         notify=False,
         *args,
         **kwargs,
@@ -154,6 +156,10 @@ class PowerDnsBaseProvider(BaseProvider):
         self._mode_of_operation = None
         # store what we were passed so that we can check it when the time comes
         self._mode_of_operation_arg = mode_of_operation
+        # set master tsig key ids
+        self.master_tsig_key_ids = master_tsig_key_ids
+        # set slave tsig key ids
+        self.slave_tsig_key_ids = slave_tsig_key_ids
 
     def _request(self, method, path, data=None):
         self.log.debug('_request: method=%s, path=%s', method, path)
@@ -454,6 +460,36 @@ class PowerDnsBaseProvider(BaseProvider):
         # >=4.2.x returns 404 when not found
         return self.powerdns_version >= [4, 2]
 
+    @property
+    def master_tsig_key_ids(self):
+        return self._master_tsig_key_ids
+
+    @master_tsig_key_ids.setter
+    def master_tsig_key_ids(self, values):
+        values = self.validate_tsig_config('master', values)
+        self._master_tsig_key_ids = values
+
+    @property
+    def slave_tsig_key_ids(self):
+        return self._slave_tsig_key_ids
+
+    @slave_tsig_key_ids.setter
+    def slave_tsig_key_ids(self, values):
+        values = self.validate_tsig_config('slave', values)
+        self._slave_tsig_key_ids = values
+
+    def validate_tsig_config(self, which, values):
+        if not isinstance(values, list) or not all([isinstance(v, str) for v in values]):
+            raise ValueError(
+                f'invalid {which}_tsig_key_ids, "{values}" - should be a list of strings'
+            )
+        for value in values:
+            if not value.endswith("."):
+                raise ValueError(
+                    f'invalid {which}_tsig_key_ids, value "{value}" - should end with a dot'
+                )
+        return values
+
     def list_zones(self):
         self.log.debug('list_zones:')
         resp = self._get('zones')
@@ -679,6 +715,41 @@ class PowerDnsBaseProvider(BaseProvider):
         except Exception:
             return ''
 
+    def _plan_meta(self, existing, desired, changes):
+        results = {}
+        zone_name = desired.name
+
+        resp = self._get_zone(zone_name)
+
+        if resp:
+            current_master_tsig_key_ids = resp.json().get(
+                "master_tsig_key_ids", []
+            )
+            desired_master_tsig_key_ids = self.master_tsig_key_ids
+
+            if list(set(current_master_tsig_key_ids)) != list(
+                set(desired_master_tsig_key_ids)
+            ):
+                results['master_tsig_key_ids'] = {
+                    'current': current_master_tsig_key_ids,
+                    'desired': desired_master_tsig_key_ids,
+                }
+
+            current_slave_tsig_key_ids = resp.json().get(
+                "slave_tsig_key_ids", []
+            )
+            desired_slave_tsig_key_ids = self.slave_tsig_key_ids
+
+            if list(set(current_slave_tsig_key_ids)) != list(
+                set(desired_slave_tsig_key_ids)
+            ):
+                results['slave_tsig_key_ids'] = {
+                    'current': current_slave_tsig_key_ids,
+                    'desired': desired_slave_tsig_key_ids,
+                }
+
+        return results
+
     def _apply(self, plan):
         desired = plan.desired
         changes = plan.changes
@@ -702,6 +773,35 @@ class PowerDnsBaseProvider(BaseProvider):
         try:
             self._patch(f'zones/{encoded_name}', data={'rrsets': mods})
             self.log.debug('_apply:   patched')
+
+            # update meta
+            _data = {}
+
+            desired_master_tsig_key_ids = plan.meta.get(
+                'master_tsig_key_ids', {}
+            ).get('desired', None)
+
+            if desired_master_tsig_key_ids is not None:
+                _data["master_tsig_key_ids"] = desired_master_tsig_key_ids
+                self.log.info(
+                    '_apply: making a change to master_tsig_key_ids meta on %s',
+                    desired.name,
+                )
+
+            desired_slave_tsig_key_ids = plan.meta.get(
+                'slave_tsig_key_ids', {}
+            ).get('desired', None)
+
+            if desired_slave_tsig_key_ids is not None:
+                _data["slave_tsig_key_ids"] = desired_slave_tsig_key_ids
+                self.log.info(
+                    '_apply: making a change to slave_tsig_key_ids meta on %s',
+                    desired.name,
+                )
+
+            if len(_data.keys()) > 0:
+                self._put(f'zones/{encoded_name}', data=_data)
+
         except HTTPError as e:
             error = self._get_error(e)
             if not (
@@ -732,6 +832,8 @@ class PowerDnsBaseProvider(BaseProvider):
                 'rrsets': mods,
                 'soa_edit_api': self.soa_edit_api,
                 'serial': 0,
+                'master_tsig_key_ids': self.master_tsig_key_ids,
+                'slave_tsig_key_ids': self.slave_tsig_key_ids,
             }
             try:
                 self._post('zones', data)
